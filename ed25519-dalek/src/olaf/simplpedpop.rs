@@ -77,7 +77,12 @@ impl SigningKey {
 
             let recipient = recipients[i as usize];
 
-            let key_exchange: EdwardsPoint = ephemeral_key.to_scalar() * recipient.point;
+            let key_exchange: EdwardsPoint = secret * recipient.point;
+
+            //println!("secret: {:?}", secret);
+            println!("point1-A: {:?}", secret * GENERATOR);
+            //println!("scalar: {:?}", ephemeral_key.to_scalar());
+            println!("point2-A: {:?}", recipient.point);
 
             let mut encryption_transcript = encryption_transcript.clone();
             encryption_transcript.append_message(b"recipient", recipient.as_bytes());
@@ -136,6 +141,12 @@ impl SigningKey {
         let mut identifiers = Vec::new();
 
         for (j, message) in messages.iter().enumerate() {
+            message
+                .content
+                .sender
+                .verify(&message.content.to_bytes(), &message.signature)
+                .map_err(DKGError::InvalidSignature)?;
+
             if &message.content.parameters != parameters {
                 return Err(DKGError::DifferentParameters);
             }
@@ -160,8 +171,8 @@ impl SigningKey {
             encryption_transcript.append_message(b"contributor", content.sender.as_bytes());
             encryption_transcript.append_message(b"nonce", &content.encryption_nonce);
 
-            if polynomial_commitment.coefficients_commitments.len() != threshold - 1 {
-                return Err(DKGError::IncorrectPolynomialCommitmentDegree);
+            if polynomial_commitment.coefficients_commitments.len() != threshold {
+                return Err(DKGError::IncorrectNumberOfCoefficientCommitments);
             }
 
             if encrypted_secret_shares.len() != participants {
@@ -176,6 +187,11 @@ impl SigningKey {
             ]);
 
             let key_exchange: EdwardsPoint = self.to_scalar() * secret_commitment;
+
+            assert!(self.to_scalar() * GENERATOR == self.verifying_key.point);
+
+            println!("point1-B: {:?}", secret_commitment);
+            println!("point2-B: {:?}", self.to_scalar() * GENERATOR);
 
             encryption_transcript.append_message(b"recipient", self.verifying_key.as_bytes());
             encryption_transcript
@@ -214,15 +230,6 @@ impl SigningKey {
             total_secret_share += secret_shares.get(j).ok_or(DKGError::InvalidSecretShare)?.0;
             group_point += secret_commitment;
         }
-
-        for i in 0..signatures.len() {
-            self.verifying_key
-                .verify(&signatures_messages[i], &signatures[i])
-                .map_err(DKGError::InvalidSignature)?;
-        }
-
-        //verify_batch(&mut signatures_transcripts, &signatures, &senders, false)
-        //.map_err(DKGError::InvalidSignature)?;
 
         for id in &identifiers {
             let evaluation = total_polynomial_commitment.evaluate(&id.0);

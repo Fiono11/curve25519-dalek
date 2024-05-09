@@ -32,9 +32,21 @@ impl Identifier {
         let mut pos = Transcript::new(b"Identifier");
         pos.append_message(b"RecipientsHash", recipients_hash);
         pos.append_message(b"i", &index.to_le_bytes()[..]);
-        let mut bytes = [0; SCALAR_LENGTH];
-        pos.challenge_bytes(b"evaluation position", &mut bytes);
 
-        Identifier(Scalar::from_canonical_bytes(bytes).unwrap())
+        let mut buf = [0; 64];
+        pos.challenge_bytes(b"identifier", &mut buf);
+
+        Identifier(Scalar::from_bytes_mod_order_wide(&buf))
     }
+}
+
+pub(crate) fn scalar_from_canonical_bytes(bytes: [u8; 32]) -> Option<Scalar> {
+    let key = Scalar::from_canonical_bytes(bytes);
+
+    // Note: this is a `CtOption` so we have to do this to extract the value.
+    if bool::from(key.is_none()) {
+        return None;
+    }
+
+    Some(key.unwrap())
 }

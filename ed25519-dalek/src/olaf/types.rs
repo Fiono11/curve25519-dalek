@@ -2,7 +2,8 @@
 
 use super::{
     errors::{DKGError, DKGResult},
-    GroupPublicKey, Identifier, VerifyingShare, GENERATOR, MINIMUM_THRESHOLD,
+    scalar_from_canonical_bytes, GroupPublicKey, Identifier, VerifyingShare, GENERATOR,
+    MINIMUM_THRESHOLD,
 };
 use crate::{VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
 use alloc::vec::Vec;
@@ -14,8 +15,8 @@ use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
 use zeroize::ZeroizeOnDrop;
 
-pub(super) const COMPRESSED_RISTRETTO_LENGTH: usize = 32;
-pub(super) const U16_LENGTH: usize = 2;
+pub(super) const COMPRESSED_EDWARDS_LENGTH: usize = 32;
+pub(super) const VEC_LENGTH: usize = 2;
 pub(super) const ENCRYPTION_NONCE_LENGTH: usize = 12;
 pub(super) const RECIPIENTS_HASH_LENGTH: usize = 16;
 pub(super) const CHACHA20POLY1305_LENGTH: usize = 64;
@@ -113,7 +114,7 @@ pub(super) struct SecretPolynomial {
 
 impl SecretPolynomial {
     pub(super) fn generate<R: RngCore + CryptoRng>(degree: usize, rng: &mut R) -> Self {
-        let mut coefficients = Vec::with_capacity(degree);
+        let mut coefficients = Vec::with_capacity(degree + 1);
 
         let mut first = Scalar::random(rng);
         while first == Scalar::ZERO {
@@ -121,7 +122,7 @@ impl SecretPolynomial {
         }
 
         coefficients.push(first);
-        coefficients.extend(iter::repeat_with(|| Scalar::random(rng)).take(degree - 1));
+        coefficients.extend(iter::repeat_with(|| Scalar::random(rng)).take(degree));
 
         SecretPolynomial { coefficients }
     }
@@ -306,17 +307,17 @@ impl MessageContent {
         cursor += ENCRYPTION_NONCE_LENGTH;
 
         let participants = u16::from_le_bytes(
-            bytes[cursor..cursor + U16_LENGTH]
+            bytes[cursor..cursor + VEC_LENGTH]
                 .try_into()
                 .map_err(DKGError::DeserializationError)?,
         );
-        cursor += U16_LENGTH;
+        cursor += VEC_LENGTH;
         let threshold = u16::from_le_bytes(
-            bytes[cursor..cursor + U16_LENGTH]
+            bytes[cursor..cursor + VEC_LENGTH]
                 .try_into()
                 .map_err(DKGError::DeserializationError)?,
         );
-        cursor += U16_LENGTH;
+        cursor += VEC_LENGTH;
 
         let recipients_hash: [u8; RECIPIENTS_HASH_LENGTH] = bytes
             [cursor..cursor + RECIPIENTS_HASH_LENGTH]
@@ -327,15 +328,17 @@ impl MessageContent {
         let mut coefficients_commitments = Vec::with_capacity(participants as usize);
 
         for _ in 0..participants {
-            let point = CompressedEdwardsY::from_slice(
-                &bytes[cursor..cursor + COMPRESSED_RISTRETTO_LENGTH],
-            )
-            .map_err(DKGError::DeserializationError)?;
+            let point =
+                CompressedEdwardsY::from_slice(&bytes[cursor..cursor + COMPRESSED_EDWARDS_LENGTH])
+                    .map_err(DKGError::DeserializationError)?;
 
-            coefficients_commitments
-                .push(point.decompress().ok_or(DKGError::InvalidRistrettoPoint)?);
+            coefficients_commitments.push(
+                point
+                    .decompress()
+                    .ok_or(DKGError::InvalidCoefficientCommitment)?,
+            );
 
-            cursor += COMPRESSED_RISTRETTO_LENGTH;
+            cursor += COMPRESSED_EDWARDS_LENGTH;
         }
 
         let polynomial_commitment = PolynomialCommitment {
@@ -468,16 +471,20 @@ impl DKGOutput {
         public_key_bytes.copy_from_slice(&bytes[cursor..cursor + PUBLIC_KEY_LENGTH]);
         cursor += PUBLIC_KEY_LENGTH;
 
-        let group_public_key = GroupPublicKey(VerifyingKey::from_bytes(&public_key_bytes).unwrap());
+        let group_public_key = GroupPublicKey(
+            VerifyingKey::from_bytes(&public_key_bytes).map_err(DKGError::InvalidPublicKey)?,
+        );
 
-        cursor += U16_LENGTH;
+        cursor += VEC_LENGTH;
 
         let mut verifying_keys = Vec::new();
 
         while cursor < bytes.len() {
             let mut identifier_bytes = [0; SCALAR_LENGTH];
             identifier_bytes.copy_from_slice(&bytes[cursor..cursor + SCALAR_LENGTH]);
-            let identifier = Scalar::from_canonical_bytes(identifier_bytes).unwrap();
+
+            let identifier =
+                scalar_from_canonical_bytes(identifier_bytes).ok_or(DKGError::InvalidIdentifier)?;
             cursor += SCALAR_LENGTH;
 
             let mut vk_bytes = [0; PUBLIC_KEY_LENGTH];
@@ -677,5 +684,102 @@ mod tests {
         encrypted_share
             .decrypt(&key_bytes, &encryption_nonce)
             .unwrap();
+    }
+
+    #[test]
+    fn test_generate_polynomial_commitment_valid() {
+        let degree = 3;
+
+        let polynomial = SecretPolynomial::generate(degree, &mut OsRng);
+
+        let polynomial_commitment = PolynomialCommitment::commit(&polynomial);
+
+        assert_eq!(polynomial.coefficients.len(), degree as usize + 1);
+
+        assert_eq!(
+            polynomial_commitment.coefficients_commitments.len(),
+            degree as usize + 1
+        );
+    }
+
+    #[test]
+    fn test_evaluate_polynomial() {
+        let coefficients: Vec<Scalar> =
+            vec![Scalar::from(3u64), Scalar::from(2u64), Scalar::from(1u64)]; // Polynomial x^2 + 2x + 3
+
+        let polynomial = SecretPolynomial { coefficients };
+
+        let value = Scalar::from(5u64); // x = 5
+
+        let result = polynomial.evaluate(&value);
+
+        assert_eq!(result, Scalar::from(38u64)); // 5^2 + 2*5 + 3
+    }
+
+    #[test]
+    fn test_sum_secret_polynomial_commitments() {
+        let polynomial_commitment1 = PolynomialCommitment {
+            coefficients_commitments: vec![
+                GENERATOR * Scalar::from(1u64), // Constant
+                GENERATOR * Scalar::from(2u64), // Linear
+                GENERATOR * Scalar::from(3u64), // Quadratic
+            ],
+        };
+
+        let polynomial_commitment2 = PolynomialCommitment {
+            coefficients_commitments: vec![
+                GENERATOR * Scalar::from(4u64), // Constant
+                GENERATOR * Scalar::from(5u64), // Linear
+                GENERATOR * Scalar::from(6u64), // Quadratic
+            ],
+        };
+
+        let summed_polynomial_commitments = PolynomialCommitment::sum_polynomial_commitments(&[
+            &polynomial_commitment1,
+            &polynomial_commitment2,
+        ]);
+
+        let expected_coefficients_commitments = vec![
+            GENERATOR * Scalar::from(5u64), // 1 + 4 = 5
+            GENERATOR * Scalar::from(7u64), // 2 + 5 = 7
+            GENERATOR * Scalar::from(9u64), // 3 + 6 = 9
+        ];
+
+        assert_eq!(
+            summed_polynomial_commitments.coefficients_commitments,
+            expected_coefficients_commitments,
+            "Coefficient commitments do not match"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_polynomial_commitment() {
+        // f(x) = 3 + 2x + x^2
+        let constant_coefficient_commitment = Scalar::from(3u64) * GENERATOR;
+        let linear_commitment = Scalar::from(2u64) * GENERATOR;
+        let quadratic_commitment = Scalar::from(1u64) * GENERATOR;
+
+        // Note the order and inclusion of the constant term
+        let coefficients_commitments = vec![
+            constant_coefficient_commitment,
+            linear_commitment,
+            quadratic_commitment,
+        ];
+
+        let polynomial_commitment = PolynomialCommitment {
+            coefficients_commitments,
+        };
+
+        let value = Scalar::from(2u64);
+
+        // f(2) = 11
+        let expected = Scalar::from(11u64) * GENERATOR;
+
+        let result = polynomial_commitment.evaluate(&value);
+
+        assert_eq!(
+            result, expected,
+            "The evaluated commitment does not match the expected result"
+        );
     }
 }

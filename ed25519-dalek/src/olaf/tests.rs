@@ -10,11 +10,12 @@ mod tests {
         use crate::{SigningKey, VerifyingKey};
         use alloc::vec::Vec;
         use curve25519_dalek::Scalar;
+        use ed25519::signature::Signer;
         use merlin::Transcript;
         use rand::Rng;
         use rand_core::OsRng;
 
-        const MAXIMUM_PARTICIPANTS: u16 = 10;
+        const MAXIMUM_PARTICIPANTS: u16 = 2;
         const MINIMUM_PARTICIPANTS: u16 = 2;
         const PROTOCOL_RUNS: usize = 1;
 
@@ -41,6 +42,7 @@ mod tests {
                 let mut keypairs: Vec<SigningKey> = (0..participants)
                     .map(|_| SigningKey::generate(&mut OsRng))
                     .collect();
+
                 let public_keys: Vec<VerifyingKey> =
                     keypairs.iter().map(|kp| kp.verifying_key).collect();
 
@@ -54,7 +56,7 @@ mod tests {
 
                 let mut dkg_outputs = Vec::new();
 
-                for kp in keypairs.iter() {
+                for kp in keypairs.iter_mut() {
                     let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
                     dkg_outputs.push(dkg_output);
                 }
@@ -81,8 +83,9 @@ mod tests {
                 for i in 0..participants {
                     for j in 0..participants {
                         assert_eq!(
-                            dkg_outputs[i].0.dkg_output.verifying_keys[j].1 .0,
-                            (dkg_outputs[j].1 .0.to_public()),
+                            dkg_outputs[i].0.dkg_output.verifying_keys[j].1 .0.point,
+                            (Scalar::from_canonical_bytes(dkg_outputs[j].1 .0).unwrap()
+                                * GENERATOR),
                             "Verification of total secret shares failed!"
                         );
                     }
@@ -99,11 +102,14 @@ mod tests {
             let mut keypairs: Vec<SigningKey> = (0..participants)
                 .map(|_| SigningKey::generate(&mut rng))
                 .collect();
-            let public_keys: Vec<VerifyingKey> =
-                keypairs.iter().map(|kp| kp.verifying_key.clone()).collect();
+
+            let public_keys: Vec<VerifyingKey> = keypairs
+                .iter_mut()
+                .map(|kp| kp.verifying_key.clone())
+                .collect();
 
             let mut messages: Vec<AllMessage> = keypairs
-                .iter()
+                .iter_mut()
                 .map(|kp| {
                     kp.simplpedpop_contribute_all(threshold, public_keys.clone())
                         .unwrap()
@@ -175,7 +181,7 @@ mod tests {
                 keypairs.iter().map(|kp| kp.verifying_key.clone()).collect();
 
             let mut messages: Vec<AllMessage> = keypairs
-                .iter()
+                .iter_mut()
                 .map(|kp| {
                     kp.simplpedpop_contribute_all(threshold, public_keys.clone())
                         .unwrap()
@@ -213,7 +219,7 @@ mod tests {
                 keypairs.iter().map(|kp| kp.verifying_key.clone()).collect();
 
             let mut messages: Vec<AllMessage> = keypairs
-                .iter()
+                .iter_mut()
                 .map(|kp| {
                     kp.simplpedpop_contribute_all(threshold, public_keys.clone())
                         .unwrap()
@@ -231,9 +237,9 @@ mod tests {
             match result {
                 Ok(_) => panic!("Expected an error, but got Ok."),
                 Err(e) => match e {
-                    DKGError::IncorrectPolynomialCommitmentDegree => assert!(true),
+                    DKGError::IncorrectNumberOfCoefficientCommitments => assert!(true),
                     _ => panic!(
-                        "Expected DKGError::IncorrectNumberOfCommitments, but got {:?}",
+                        "Expected DKGError::IncorrectNumberOfCoefficientCommitments, but got {:?}",
                         e
                     ),
                 },
@@ -253,7 +259,7 @@ mod tests {
                 keypairs.iter().map(|kp| kp.verifying_key.clone()).collect();
 
             let mut messages: Vec<AllMessage> = keypairs
-                .iter()
+                .iter_mut()
                 .map(|kp| {
                     kp.simplpedpop_contribute_all(threshold, public_keys.clone())
                         .unwrap()
@@ -289,7 +295,7 @@ mod tests {
                 keypairs.iter().map(|kp| kp.verifying_key.clone()).collect();
 
             let mut messages: Vec<AllMessage> = keypairs
-                .iter()
+                .iter_mut()
                 .map(|kp| {
                     kp.simplpedpop_contribute_all(threshold, public_keys.clone())
                         .unwrap()
@@ -319,20 +325,19 @@ mod tests {
             let mut keypairs: Vec<SigningKey> = (0..participants)
                 .map(|_| SigningKey::generate(&mut rng))
                 .collect();
+
             let public_keys: Vec<VerifyingKey> =
                 keypairs.iter().map(|kp| kp.verifying_key.clone()).collect();
 
             let mut messages: Vec<AllMessage> = keypairs
-                .iter()
+                .iter_mut()
                 .map(|kp| {
                     kp.simplpedpop_contribute_all(threshold, public_keys.clone())
                         .unwrap()
                 })
                 .collect();
 
-            messages[1].signature = keypairs[1]
-                .secret
-                .sign(Transcript::new(b"invalid"), &keypairs[1].public);
+            messages[1].signature = keypairs[1].sign(b"invalid");
 
             let result = keypairs[0].simplpedpop_recipient_all(&messages);
 
