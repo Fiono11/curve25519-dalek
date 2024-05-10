@@ -293,7 +293,7 @@ pub use ed25519::Signature;
 #[cfg(feature = "pkcs8")]
 pub use ed25519::pkcs8;
 
-//#[cfg(feature = "olaf")]
+#[cfg(feature = "olaf")]
 mod olaf;
 
 #[cfg(feature = "olaf")]
