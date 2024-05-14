@@ -141,12 +141,6 @@ impl SigningKey {
         let mut identifiers = Vec::new();
 
         for (j, message) in messages.iter().enumerate() {
-            message
-                .content
-                .sender
-                .verify(&message.content.to_bytes(), &message.signature)
-                .map_err(DKGError::InvalidSignature)?;
-
             if &message.content.parameters != parameters {
                 return Err(DKGError::DifferentParameters);
             }
@@ -190,9 +184,6 @@ impl SigningKey {
 
             assert!(self.to_scalar() * GENERATOR == self.verifying_key.point);
 
-            println!("point1-B: {:?}", secret_commitment);
-            println!("point2-B: {:?}", self.to_scalar() * GENERATOR);
-
             encryption_transcript.append_message(b"recipient", self.verifying_key.as_bytes());
             encryption_transcript
                 .append_message(b"key exchange", &key_exchange.compress().as_bytes()[..]);
@@ -229,6 +220,12 @@ impl SigningKey {
 
             total_secret_share += secret_shares.get(j).ok_or(DKGError::InvalidSecretShare)?.0;
             group_point += secret_commitment;
+
+            message
+                .content
+                .sender
+                .verify(&message.content.to_bytes(), &message.signature)
+                .map_err(DKGError::InvalidSignature)?;
         }
 
         for id in &identifiers {
