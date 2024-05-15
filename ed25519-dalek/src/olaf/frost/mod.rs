@@ -169,7 +169,7 @@ impl SigningKeypair {
     ) -> SignatureShare {
         let z_share: Scalar = signer_nonces.hiding.0
             + (signer_nonces.binding.0 * binding_factor.0)
-            + (lambda_i * self.0.to_scalar() * challenge);
+            + (lambda_i * Scalar::from_canonical_bytes(self.0.secret_key).unwrap() * challenge);
 
         SignatureShare { share: z_share }
     }
