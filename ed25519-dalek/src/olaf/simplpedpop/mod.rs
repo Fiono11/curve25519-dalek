@@ -1,18 +1,23 @@
-use super::{
-    errors::{DKGError, DKGResult},
+mod errors;
+mod types;
+
+pub(crate) use self::types::SecretPolynomial;
+pub use self::types::{AllMessage, DKGOutput, Parameters};
+use self::{
+    errors::{SPPError, SPPResult},
     types::{
-        AllMessage, DKGOutput, DKGOutputMessage, MessageContent, Parameters, PolynomialCommitment,
-        SecretPolynomial, SecretShare, CHACHA20POLY1305_KEY_LENGTH, ENCRYPTION_NONCE_LENGTH,
-        RECIPIENTS_HASH_LENGTH,
+        DKGOutputMessage, MessageContent, PolynomialCommitment, SecretShare,
+        CHACHA20POLY1305_KEY_LENGTH, ENCRYPTION_NONCE_LENGTH, RECIPIENTS_HASH_LENGTH,
     },
-    GroupPublicKey, Identifier, SigningShare, VerifyingShare, GENERATOR,
 };
-use crate::{SecretKey, SigningKey, VerifyingKey};
+use crate::{olaf::GENERATOR, SigningKey, VerifyingKey};
 use alloc::vec::Vec;
 use curve25519_dalek::{traits::Identity, EdwardsPoint, Scalar};
 use ed25519::signature::{SignerMut, Verifier};
 use merlin::Transcript;
 use rand_core::{OsRng, RngCore};
+
+use super::{Identifier, SigningKeypair, ThresholdPublicKey, VerifyingShare};
 
 impl SigningKey {
     /// First round of the SimplPedPoP protocol.
@@ -20,7 +25,7 @@ impl SigningKey {
         &mut self,
         threshold: u16,
         recipients: Vec<VerifyingKey>,
-    ) -> DKGResult<AllMessage> {
+    ) -> SPPResult<AllMessage> {
         let parameters = Parameters::generate(recipients.len() as u16, threshold);
         parameters.validate()?;
 
@@ -67,6 +72,7 @@ impl SigningKey {
         rng.fill_bytes(&mut nonce);
 
         let ephemeral_key = SigningKey::from_bytes(secret.as_bytes());
+        //let ephemeral_key = SigningKey::generate(&mut rng);
 
         for i in 0..parameters.participants {
             let identifier = Identifier::generate(&recipients_hash, i);
@@ -78,11 +84,6 @@ impl SigningKey {
             let recipient = recipients[i as usize];
 
             let key_exchange: EdwardsPoint = secret * recipient.point;
-
-            //println!("secret: {:?}", secret);
-            println!("point1-A: {:?}", secret * GENERATOR);
-            //println!("scalar: {:?}", ephemeral_key.to_scalar());
-            println!("point2-A: {:?}", recipient.point);
 
             let mut encryption_transcript = encryption_transcript.clone();
             encryption_transcript.append_message(b"recipient", recipient.as_bytes());
@@ -116,7 +117,7 @@ impl SigningKey {
     pub fn simplpedpop_recipient_all(
         &mut self,
         messages: &[AllMessage],
-    ) -> DKGResult<(DKGOutputMessage, SigningShare)> {
+    ) -> SPPResult<(DKGOutputMessage, SigningKeypair)> {
         let first_message = &messages[0];
         let parameters = &first_message.content.parameters;
         let threshold = parameters.threshold as usize;
@@ -125,7 +126,7 @@ impl SigningKey {
         first_message.content.parameters.validate()?;
 
         if messages.len() < participants {
-            return Err(DKGError::InvalidNumberOfMessages);
+            return Err(SPPError::InvalidNumberOfMessages);
         }
 
         let mut secret_shares = Vec::with_capacity(participants);
@@ -142,10 +143,10 @@ impl SigningKey {
 
         for (j, message) in messages.iter().enumerate() {
             if &message.content.parameters != parameters {
-                return Err(DKGError::DifferentParameters);
+                return Err(SPPError::DifferentParameters);
             }
             if message.content.recipients_hash != first_message.content.recipients_hash {
-                return Err(DKGError::DifferentRecipientsHash);
+                return Err(SPPError::DifferentRecipientsHash);
             }
 
             let content = &message.content;
@@ -166,11 +167,11 @@ impl SigningKey {
             encryption_transcript.append_message(b"nonce", &content.encryption_nonce);
 
             if polynomial_commitment.coefficients_commitments.len() != threshold {
-                return Err(DKGError::IncorrectNumberOfCoefficientCommitments);
+                return Err(SPPError::IncorrectNumberOfCoefficientCommitments);
             }
 
             if encrypted_secret_shares.len() != participants {
-                return Err(DKGError::IncorrectNumberOfEncryptedShares);
+                return Err(SPPError::IncorrectNumberOfEncryptedShares);
             }
 
             signatures_messages.push(content.to_bytes());
@@ -218,14 +219,14 @@ impl SigningKey {
                 }
             }
 
-            total_secret_share += secret_shares.get(j).ok_or(DKGError::InvalidSecretShare)?.0;
+            total_secret_share += secret_shares.get(j).ok_or(SPPError::InvalidSecretShare)?.0;
             group_point += secret_commitment;
 
             message
                 .content
                 .sender
                 .verify(&message.content.to_bytes(), &message.signature)
-                .map_err(DKGError::InvalidSignature)?;
+                .map_err(SPPError::InvalidSignature)?;
         }
 
         for id in &identifiers {
@@ -234,7 +235,8 @@ impl SigningKey {
         }
 
         let dkg_output = DKGOutput::new(
-            GroupPublicKey(VerifyingKey::from(group_point)),
+            parameters,
+            ThresholdPublicKey(VerifyingKey::from(group_point)),
             verifying_keys,
         );
 
@@ -246,6 +248,93 @@ impl SigningKey {
 
         let signing_key = SigningKey::from_bytes(total_secret_share.as_bytes());
 
-        Ok((dkg_output, SigningShare(signing_key.secret_key)))
+        Ok((dkg_output, SigningKeypair(signing_key)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::olaf::simplpedpop::types::{AllMessage, Parameters};
+    use crate::olaf::{GENERATOR, MINIMUM_THRESHOLD};
+    use crate::{SigningKey, VerifyingKey};
+    use alloc::vec::Vec;
+    use curve25519_dalek::Scalar;
+    use rand::Rng;
+    use rand_core::OsRng;
+
+    const MAXIMUM_PARTICIPANTS: u16 = 10;
+    const MINIMUM_PARTICIPANTS: u16 = 2;
+    const PROTOCOL_RUNS: usize = 1;
+
+    fn generate_parameters() -> Parameters {
+        let mut rng = rand::thread_rng();
+        let participants = rng.gen_range(MINIMUM_PARTICIPANTS..=MAXIMUM_PARTICIPANTS);
+        let threshold = rng.gen_range(MINIMUM_THRESHOLD..=participants);
+
+        Parameters {
+            participants,
+            threshold,
+        }
+    }
+
+    #[test]
+    fn test_simplpedpop_protocol() {
+        for _ in 0..PROTOCOL_RUNS {
+            let parameters = generate_parameters();
+            let participants = parameters.participants as usize;
+            let threshold = parameters.threshold as usize;
+
+            let mut keypairs: Vec<SigningKey> = (0..participants)
+                .map(|_| SigningKey::generate(&mut OsRng))
+                .collect();
+
+            let public_keys: Vec<VerifyingKey> =
+                keypairs.iter().map(|kp| kp.verifying_key).collect();
+
+            let mut all_messages = Vec::new();
+            for i in 0..participants {
+                let message: AllMessage = keypairs[i]
+                    .simplpedpop_contribute_all(threshold as u16, public_keys.clone())
+                    .unwrap();
+                all_messages.push(message);
+            }
+
+            let mut dkg_outputs = Vec::new();
+
+            for kp in keypairs.iter_mut() {
+                let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+                dkg_outputs.push(dkg_output);
+            }
+
+            // Verify that all DKG outputs are equal for group_public_key and verifying_keys
+            assert!(
+                dkg_outputs
+                    .windows(2)
+                    .all(|w| w[0].0.dkg_output.group_public_key.0
+                        == w[1].0.dkg_output.group_public_key.0
+                        && w[0].0.dkg_output.verifying_keys.len()
+                            == w[1].0.dkg_output.verifying_keys.len()
+                        && w[0]
+                            .0
+                            .dkg_output
+                            .verifying_keys
+                            .iter()
+                            .zip(w[1].0.dkg_output.verifying_keys.iter())
+                            .all(|((a, b), (c, d))| a.0 == c.0 && b.0 == d.0)),
+                "All DKG outputs should have identical group public keys and verifying keys."
+            );
+
+            // Verify that all verifying_shares are valid
+            for i in 0..participants {
+                for j in 0..participants {
+                    assert_eq!(
+                        dkg_outputs[i].0.dkg_output.verifying_keys[j].1 .0.point,
+                        (Scalar::from_canonical_bytes(dkg_outputs[j].1 .0.secret_key).unwrap()
+                            * GENERATOR),
+                        "Verification of total secret shares failed!"
+                    );
+                }
+            }
+        }
     }
 }
