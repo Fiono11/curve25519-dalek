@@ -1,8 +1,6 @@
 //! Internal types of the FROST protocol.
 
-use std::io::Read;
-
-use super::errors::FROSTError;
+use super::{errors::FROSTError, hash_to_array, hash_to_scalar};
 use crate::{
     olaf::{ThresholdPublicKey, GENERATOR},
     SecretKey,
@@ -40,64 +38,73 @@ impl BindingFactorList {
         signing_commitments: &[SigningCommitments],
         verifying_key: &ThresholdPublicKey,
         message: &[u8],
+        additional_prefix: &[u8],
     ) -> BindingFactorList {
-        let mut transcripts = BindingFactorList::binding_factor_transcripts(
+        let preimages = BindingFactorList::binding_factor_preimages(
             signing_commitments,
             verifying_key,
             message,
+            additional_prefix,
         );
 
-        BindingFactorList::new(
-            transcripts
-                .iter_mut()
-                .map(|(identifier, transcript)| {
-                    let mut buf = [0; 64];
-                    transcript.challenge_bytes(b"binding factor", &mut buf);
-                    let binding_factor = Scalar::from_bytes_mod_order_wide(&buf);
-
+        BindingFactorList(
+            preimages
+                .iter()
+                .map(|(identifier, preimage)| {
+                    let binding_factor = hash_to_scalar(&[preimage]);
                     (*identifier, BindingFactor(binding_factor))
                 })
                 .collect(),
         )
     }
 
-    fn binding_factor_transcripts(
+    fn binding_factor_preimages(
         signing_commitments: &[SigningCommitments],
         verifying_key: &ThresholdPublicKey,
         message: &[u8],
-    ) -> Vec<(u16, Transcript)> {
-        let mut transcript = Transcript::new(b"binding_factor");
+        additional_prefix: &[u8],
+    ) -> Vec<(u16, Vec<u8>)> {
+        let mut binding_factor_input_prefix = vec![];
 
-        transcript.append_message(b"verifying_key", verifying_key.0.as_bytes());
+        // The length of a serialized verifying key of the same cipersuite does
+        // not change between runs of the protocol, so we don't need to hash to
+        // get a fixed length.
+        binding_factor_input_prefix.extend_from_slice(verifying_key.0.as_bytes());
 
-        transcript.append_message(b"message", message);
-
-        let mut buf = [0; 64];
-        BindingFactorList::encode_group_commitments(signing_commitments)
-            .challenge_bytes(b"encode_group_commitments", &mut buf);
-        let group_commitment = Scalar::from_bytes_mod_order_wide(&buf);
-
-        transcript.append_message(b"group_commitment", group_commitment.as_bytes());
+        // The message is hashed with H4 to force the variable-length message
+        // into a fixed-length byte string, same for hashing the variable-sized
+        // (between runs of the protocol) set of group commitments, but with H5.
+        binding_factor_input_prefix.extend_from_slice(hash_to_array(&[message]).as_ref());
+        binding_factor_input_prefix.extend_from_slice(
+            hash_to_array(&[
+                &BindingFactorList::encode_group_commitments(&signing_commitments)[..].as_ref(),
+            ])
+            .as_ref(),
+        );
+        binding_factor_input_prefix.extend_from_slice(additional_prefix);
 
         signing_commitments
             .iter()
             .enumerate()
             .map(|(i, _)| {
-                transcript.append_message(b"identifier", &i.to_le_bytes());
-                (i as u16, transcript.clone())
+                let mut binding_factor_input = vec![];
+
+                binding_factor_input.extend_from_slice(&binding_factor_input_prefix);
+                binding_factor_input.extend_from_slice(&i.to_le_bytes());
+                (i as u16, binding_factor_input)
             })
             .collect()
     }
 
-    fn encode_group_commitments(signing_commitments: &[SigningCommitments]) -> Transcript {
-        let mut transcript = Transcript::new(b"encode_group_commitments");
+    fn encode_group_commitments(signing_commitments: &[SigningCommitments]) -> Vec<u8> {
+        let mut bytes = vec![];
 
         for item in signing_commitments {
-            transcript.append_message(b"hiding", item.hiding.0.compress().as_bytes());
-            transcript.append_message(b"binding", item.binding.0.compress().as_bytes());
+            bytes.extend_from_slice(item.hiding.0.compress().as_bytes());
+            bytes.extend_from_slice(item.binding.0.compress().as_bytes());
         }
 
-        transcript
+        bytes
     }
 }
 

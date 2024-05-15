@@ -19,8 +19,8 @@ use super::{
 use alloc::vec::Vec;
 use curve25519_dalek::Scalar;
 use ed25519::{signature::Verifier, Signature};
-use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
+use sha2::{Digest, Sha512};
 
 impl SigningKeypair {
     /// Done once by each participant, to generate _their_ nonces and commitments
@@ -87,7 +87,6 @@ impl SigningKeypair {
     /// [`sign`]: https://www.ietf.org/archive/id/draft-irtf-cfrg-frost-14.html#name-round-two-signature-share-g
     pub fn sign(
         &self,
-        context: &[u8],
         message: &[u8],
         dkg_output: &DKGOutput,
         all_signing_commitments: &[SigningCommitments],
@@ -129,6 +128,7 @@ impl SigningKeypair {
             all_signing_commitments,
             &dkg_output.group_public_key,
             message,
+            &[],
         );
 
         let group_commitment =
@@ -142,16 +142,13 @@ impl SigningKeypair {
             *identifiers[index],
         );
 
-        let mut transcript = Transcript::new(b"challenge");
-        //transcript.proto_name(b"Schnorr-sig");
-        {
-            let this = &mut transcript;
-            let compressed = dkg_output.group_public_key.0;
-            this.append_message(b"sign:pk", compressed.as_bytes());
-        };
-        //transcript.commit_point(b"sign:R", &group_commitment.0.compress());
-        //let challenge = transcript.challenge_scalar(b"sign:c");
-        let challenge = Scalar::ONE;
+        let mut preimage = vec![];
+
+        preimage.extend_from_slice(group_commitment.0.compress().as_bytes());
+        preimage.extend_from_slice(dkg_output.group_public_key.0.as_bytes());
+        preimage.extend_from_slice(&message);
+
+        let challenge = hash_to_scalar(&[&preimage[..]]);
 
         let signature_share = self.compute_signature_share(
             signer_nonces,
@@ -198,7 +195,6 @@ impl SigningKeypair {
 /// service attack due to publishing an invalid signature.
 pub fn aggregate(
     message: &[u8],
-    context: &[u8],
     signing_commitments: &[SigningCommitments],
     signature_shares: &Vec<SignatureShare>,
     group_public_key: ThresholdPublicKey,
@@ -208,7 +204,7 @@ pub fn aggregate(
     }
 
     let binding_factor_list: BindingFactorList =
-        BindingFactorList::compute(signing_commitments, &group_public_key, message);
+        BindingFactorList::compute(signing_commitments, &group_public_key, message, &[]);
 
     let group_commitment = GroupCommitment::compute(signing_commitments, &binding_factor_list)?;
 
@@ -219,8 +215,8 @@ pub fn aggregate(
     }
 
     let mut bytes = [0; 64];
-    bytes.copy_from_slice(group_commitment.0.compress().as_bytes());
-    bytes.copy_from_slice(s.as_bytes());
+    bytes[0..32].copy_from_slice(group_commitment.0.compress().as_bytes());
+    bytes[32..].copy_from_slice(s.as_bytes());
 
     let group_signature = Signature::from_bytes(&bytes);
 
@@ -230,6 +226,21 @@ pub fn aggregate(
         .map_err(FROSTError::InvalidSignature)?;
 
     Ok(group_signature)
+}
+
+pub(super) fn hash_to_array(inputs: &[&[u8]]) -> [u8; 64] {
+    let mut h = Sha512::new();
+    for i in inputs {
+        h.update(i);
+    }
+    let mut output = [0u8; 64];
+    output.copy_from_slice(h.finalize().as_slice());
+    output
+}
+
+pub(super) fn hash_to_scalar(inputs: &[&[u8]]) -> Scalar {
+    let output = hash_to_array(inputs);
+    Scalar::from_bytes_mod_order_wide(&output)
 }
 
 #[cfg(test)]
@@ -271,7 +282,8 @@ mod tests {
         let mut keypairs: Vec<SigningKey> = (0..participants)
             .map(|_| SigningKey::generate(&mut rng))
             .collect();
-        let public_keys: Vec<VerifyingKey> = keypairs.iter().map(|kp| kp.verifying_key).collect();
+        let public_keys: Vec<VerifyingKey> =
+            keypairs.iter_mut().map(|kp| kp.verifying_key).collect();
 
         let mut all_messages = Vec::new();
         for i in 0..participants {
@@ -283,7 +295,7 @@ mod tests {
 
         let mut dkg_outputs = Vec::new();
 
-        for kp in keypairs.iter() {
+        for kp in &mut keypairs {
             let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
             dkg_outputs.push(dkg_output);
         }
@@ -300,13 +312,11 @@ mod tests {
         let mut signature_shares = Vec::new();
 
         let message = b"message";
-        let context = b"context";
 
         for (i, dkg_output) in dkg_outputs.iter().enumerate() {
             let signature_share = dkg_output
                 .1
                 .sign(
-                    context,
                     message,
                     &dkg_output.0.dkg_output,
                     &all_signing_commitments,
@@ -319,7 +329,6 @@ mod tests {
 
         aggregate(
             message,
-            context,
             &all_signing_commitments,
             &signature_shares,
             dkg_outputs[0].0.dkg_output.group_public_key,
@@ -349,7 +358,7 @@ mod tests {
 
         let mut dkg_outputs = Vec::new();
 
-        for kp in keypairs.iter() {
+        for kp in &mut keypairs {
             let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
             dkg_outputs.push(dkg_output);
         }
@@ -366,13 +375,11 @@ mod tests {
         let mut signature_shares = Vec::new();
 
         let message = b"message";
-        let context = b"context";
 
         for (i, dkg_output) in dkg_outputs[..threshold].iter().enumerate() {
             let signature_share = dkg_output
                 .1
                 .sign(
-                    context,
                     message,
                     &dkg_output.0.dkg_output,
                     &all_signing_commitments,
@@ -385,7 +392,6 @@ mod tests {
 
         aggregate(
             message,
-            context,
             &all_signing_commitments,
             &signature_shares,
             dkg_outputs[0].0.dkg_output.group_public_key,
@@ -403,7 +409,8 @@ mod tests {
         let mut keypairs: Vec<SigningKey> = (0..participants)
             .map(|_| SigningKey::generate(&mut rng))
             .collect();
-        let public_keys: Vec<VerifyingKey> = keypairs.iter().map(|kp| kp.verifying_key).collect();
+        let public_keys: Vec<VerifyingKey> =
+            keypairs.iter_mut().map(|kp| kp.verifying_key).collect();
 
         let mut all_messages = Vec::new();
         for i in 0..participants {
@@ -415,7 +422,7 @@ mod tests {
 
         let mut dkg_outputs = Vec::new();
 
-        for kp in &keypairs {
+        for kp in &mut keypairs {
             let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
             dkg_outputs.push(dkg_output);
         }
@@ -455,8 +462,6 @@ mod tests {
             messages.push(message);
         }
 
-        let context = b"context";
-
         for i in 0..NONCES {
             let message = &messages[i as usize];
 
@@ -468,7 +473,6 @@ mod tests {
                 let signature_share = dkg_output
                     .1
                     .sign(
-                        context,
                         &message,
                         &dkg_output.0.dkg_output,
                         &commitments,
@@ -479,14 +483,7 @@ mod tests {
                 signature_shares.push(signature_share);
             }
 
-            aggregate(
-                &message,
-                context,
-                &commitments,
-                &signature_shares,
-                group_public_key,
-            )
-            .unwrap();
+            aggregate(&message, &commitments, &signature_shares, group_public_key).unwrap();
 
             signature_shares = Vec::new();
         }

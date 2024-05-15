@@ -10,7 +10,7 @@ use self::{
         CHACHA20POLY1305_KEY_LENGTH, ENCRYPTION_NONCE_LENGTH, RECIPIENTS_HASH_LENGTH,
     },
 };
-use crate::{olaf::GENERATOR, SigningKey, VerifyingKey};
+use crate::{olaf::GENERATOR, SecretKey, SigningKey, VerifyingKey};
 use alloc::vec::Vec;
 use curve25519_dalek::{traits::Identity, EdwardsPoint, Scalar};
 use ed25519::signature::{SignerMut, Verifier};
@@ -246,7 +246,10 @@ impl SigningKey {
         let mut nonce: [u8; 32] = [0u8; 32];
         OsRng.fill_bytes(&mut nonce);
 
-        let signing_key = SigningKey::from_bytes(total_secret_share.as_bytes());
+        let signing_key = SigningKey {
+            secret_key: *total_secret_share.as_bytes(),
+            verifying_key: VerifyingKey::from(total_secret_share * GENERATOR),
+        };
 
         Ok((dkg_output, SigningKeypair(signing_key)))
     }
