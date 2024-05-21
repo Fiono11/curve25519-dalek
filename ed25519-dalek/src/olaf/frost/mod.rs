@@ -104,7 +104,6 @@ impl SigningKeypair {
         all_signing_commitments: &[SigningCommitments],
         signer_nonces: &SigningNonces,
     ) -> FROSTResult<SigningPackage> {
-        let threshold_public_key = &spp_output.threshold_public_key;
         let len = all_signing_commitments.len();
 
         if len < spp_output.parameters.threshold as usize {
@@ -257,7 +256,7 @@ pub fn aggregate(signing_packages: &[SigningPackage]) -> Result<Signature, FROST
 
     let mut s = Scalar::ZERO;
 
-    for signature_share in signature_shares {
+    for signature_share in &signature_shares {
         s += signature_share.share;
     }
 
@@ -267,10 +266,59 @@ pub fn aggregate(signing_packages: &[SigningPackage]) -> Result<Signature, FROST
 
     let group_signature = Signature::from_bytes(&bytes);
 
-    threshold_public_key
+    let verification_result = threshold_public_key
         .0
         .verify(message, &group_signature)
-        .map_err(FROSTError::InvalidSignature)?;
+        .map_err(FROSTError::InvalidSignature);
+
+    let identifiers: Vec<Identifier> = spp_output.verifying_keys.iter().map(|x| x.0).collect();
+
+    let verifying_shares: Vec<VerifyingShare> =
+        spp_output.verifying_keys.iter().map(|x| x.1).collect();
+
+    let mut valid_shares = Vec::new();
+
+    // Only if the verification of the aggregate signature failed; verify each share to find the cheater.
+    // This approach is more efficient since we don't need to verify all shares
+    // if the aggregate signature is valid (which should be the common case).
+    if verification_result.is_err() {
+        // Compute the per-message challenge.
+        let mut preimage = vec![];
+
+        preimage.extend_from_slice(group_commitment.0.compress().as_bytes());
+        preimage.extend_from_slice(spp_output.threshold_public_key.0.as_bytes());
+        preimage.extend_from_slice(&message);
+
+        let challenge = hash_to_scalar(&[&preimage[..]]);
+
+        // Verify the signature shares.
+        for (j, signature_share) in signature_shares.iter().enumerate() {
+            for (i, (identifier, verifying_share)) in spp_output.verifying_keys.iter().enumerate() {
+                let lambda_i = compute_lagrange_coefficient(&identifiers, None, *identifier);
+
+                let binding_factor = &binding_factor_list.0.get(i).expect("This never fails because signature_shares.len() == signing_commitments.len().").1;
+
+                let R_share = signing_commitments[j].to_group_commitment_share(binding_factor);
+
+                if signature_share.verify(&R_share, verifying_share, lambda_i, &challenge) {
+                    valid_shares.push(*verifying_share);
+                    break;
+                }
+            }
+        }
+
+        let mut invalid_shares = Vec::new();
+
+        for verifying_share in verifying_shares {
+            if !valid_shares.contains(&verifying_share) {
+                invalid_shares.push(verifying_share);
+            }
+        }
+
+        return Err(FROSTError::InvalidSignatureShare {
+            culprit: invalid_shares,
+        });
+    }
 
     Ok(group_signature)
 }

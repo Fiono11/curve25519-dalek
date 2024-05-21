@@ -346,6 +346,13 @@ impl SigningCommitments {
 
         Ok(SigningCommitments { hiding, binding })
     }
+
+    pub(super) fn to_group_commitment_share(
+        self,
+        binding_factor: &BindingFactor,
+    ) -> GroupCommitmentShare {
+        GroupCommitmentShare(self.hiding.0 + (self.binding.0 * binding_factor.0))
+    }
 }
 
 impl From<&SigningNonces> for SigningCommitments {
