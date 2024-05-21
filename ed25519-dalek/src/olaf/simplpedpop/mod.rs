@@ -1,16 +1,16 @@
-mod errors;
+pub mod errors;
 mod types;
 
 pub(crate) use self::types::SecretPolynomial;
-pub use self::types::{AllMessage, DKGOutput, Parameters};
+pub use self::types::{AllMessage, Parameters, SPPOutput};
 use self::{
     errors::{SPPError, SPPResult},
     types::{
-        DKGOutputMessage, MessageContent, PolynomialCommitment, SecretShare,
+        MessageContent, PolynomialCommitment, SPPOutputMessage, SecretShare,
         CHACHA20POLY1305_KEY_LENGTH, ENCRYPTION_NONCE_LENGTH, RECIPIENTS_HASH_LENGTH,
     },
 };
-use crate::{olaf::GENERATOR, SecretKey, SigningKey, VerifyingKey};
+use crate::{olaf::GENERATOR, SigningKey, VerifyingKey};
 use alloc::vec::Vec;
 use curve25519_dalek::{traits::Identity, EdwardsPoint, Scalar};
 use ed25519::signature::{SignerMut, Verifier};
@@ -117,7 +117,7 @@ impl SigningKey {
     pub fn simplpedpop_recipient_all(
         &mut self,
         messages: &[AllMessage],
-    ) -> SPPResult<(DKGOutputMessage, SigningKeypair)> {
+    ) -> SPPResult<(SPPOutputMessage, SigningKeypair)> {
         let first_message = &messages[0];
         let parameters = &first_message.content.parameters;
         let threshold = parameters.threshold as usize;
@@ -234,14 +234,14 @@ impl SigningKey {
             verifying_keys.push((*id, VerifyingShare(VerifyingKey::from(evaluation))));
         }
 
-        let dkg_output = DKGOutput::new(
+        let spp_output = SPPOutput::new(
             parameters,
             ThresholdPublicKey(VerifyingKey::from(group_point)),
             verifying_keys,
         );
 
-        let signature = self.sign(&dkg_output.to_bytes());
-        let dkg_output = DKGOutputMessage::new(self.verifying_key, dkg_output, signature);
+        let signature = self.sign(&spp_output.to_bytes());
+        let spp_output = SPPOutputMessage::new(self.verifying_key, spp_output, signature);
 
         let mut nonce: [u8; 32] = [0u8; 32];
         OsRng.fill_bytes(&mut nonce);
@@ -251,7 +251,7 @@ impl SigningKey {
             verifying_key: VerifyingKey::from(total_secret_share * GENERATOR),
         };
 
-        Ok((dkg_output, SigningKeypair(signing_key)))
+        Ok((spp_output, SigningKeypair(signing_key)))
     }
 }
 
@@ -302,37 +302,37 @@ mod tests {
                 all_messages.push(message);
             }
 
-            let mut dkg_outputs = Vec::new();
+            let mut spp_outputs = Vec::new();
 
             for kp in keypairs.iter_mut() {
-                let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
-                dkg_outputs.push(dkg_output);
+                let spp_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+                spp_outputs.push(spp_output);
             }
 
-            // Verify that all DKG outputs are equal for group_public_key and verifying_keys
+            // Verify that all SPP outputs are equal for group_public_key and verifying_keys
             assert!(
-                dkg_outputs
+                spp_outputs
                     .windows(2)
-                    .all(|w| w[0].0.dkg_output.group_public_key.0
-                        == w[1].0.dkg_output.group_public_key.0
-                        && w[0].0.dkg_output.verifying_keys.len()
-                            == w[1].0.dkg_output.verifying_keys.len()
+                    .all(|w| w[0].0.spp_output.threshold_public_key.0
+                        == w[1].0.spp_output.threshold_public_key.0
+                        && w[0].0.spp_output.verifying_keys.len()
+                            == w[1].0.spp_output.verifying_keys.len()
                         && w[0]
                             .0
-                            .dkg_output
+                            .spp_output
                             .verifying_keys
                             .iter()
-                            .zip(w[1].0.dkg_output.verifying_keys.iter())
+                            .zip(w[1].0.spp_output.verifying_keys.iter())
                             .all(|((a, b), (c, d))| a.0 == c.0 && b.0 == d.0)),
-                "All DKG outputs should have identical group public keys and verifying keys."
+                "All SPP outputs should have identical group public keys and verifying keys."
             );
 
             // Verify that all verifying_shares are valid
             for i in 0..participants {
                 for j in 0..participants {
                     assert_eq!(
-                        dkg_outputs[i].0.dkg_output.verifying_keys[j].1 .0.point,
-                        (Scalar::from_canonical_bytes(dkg_outputs[j].1 .0.secret_key).unwrap()
+                        spp_outputs[i].0.spp_output.verifying_keys[j].1 .0.point,
+                        (Scalar::from_canonical_bytes(spp_outputs[j].1 .0.secret_key).unwrap()
                             * GENERATOR),
                         "Verification of total secret shares failed!"
                     );

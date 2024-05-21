@@ -21,13 +21,13 @@ pub(super) const COMPRESSED_EDWARDS_LENGTH: usize = 32;
 pub(super) const VEC_LENGTH: usize = 2;
 pub(super) const ENCRYPTION_NONCE_LENGTH: usize = 12;
 pub(super) const RECIPIENTS_HASH_LENGTH: usize = 16;
-pub(super) const CHACHA20POLY1305_LENGTH: usize = 64;
+pub(super) const CHACHA20POLY1305_LENGTH: usize = 48;
 pub(super) const CHACHA20POLY1305_KEY_LENGTH: usize = 32;
 pub(super) const SCALAR_LENGTH: usize = 32;
 pub(super) const U16_LENGTH: usize = 2;
 
 /// The parameters of a given execution of the SimplPedPoP protocol.
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameters {
     pub(crate) participants: u16,
     pub(crate) threshold: u16,
@@ -108,7 +108,7 @@ impl SecretShare {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncryptedSecretShare(pub(super) Vec<u8>);
 
 impl EncryptedSecretShare {
@@ -166,46 +166,10 @@ impl SecretPolynomial {
 
         value
     }
-
-    /// Generates a lagrange coefficient.
-    ///
-    /// The Lagrange polynomial for a set of points (x_j, y_j) for 0 <= j <= k
-    /// is ∑_{i=0}^k y_i.ℓ_i(x), where ℓ_i(x) is the Lagrange basis polynomial:
-    ///
-    /// ℓ_i(x) = ∏_{0≤j≤k; j≠i} (x - x_j) / (x_i - x_j).
-    ///
-    /// This computes ℓ_j(x) for the set of points `xs` and for the j corresponding
-    /// to the given xj.
-    ///
-    /// If `x` is None, it uses 0 for it (since Identifiers can't be 0).
-    pub(crate) fn compute_lagrange_coefficient(
-        x_set: &[Identifier],
-        x: Option<Identifier>,
-        x_i: Identifier,
-    ) -> Scalar {
-        let mut num = Scalar::ONE;
-        let mut den = Scalar::ONE;
-
-        for x_j in x_set.iter() {
-            if x_i == *x_j {
-                continue;
-            }
-
-            if let Some(x) = x {
-                num *= x.0 - x_j.0;
-                den *= x_i.0 - x_j.0;
-            } else {
-                // Both signs inverted just to avoid requiring Neg (-*xj)
-                num *= x_j.0;
-                den *= x_j.0 - x_i.0;
-            }
-        }
-
-        num * den.invert()
-    }
 }
 
 /// The polynomial commitment of a participant, used to verify the secret shares without revealing the polynomial.
+#[derive(Debug, PartialEq, Eq)]
 pub struct PolynomialCommitment {
     pub(super) coefficients_commitments: Vec<EdwardsPoint>,
 }
@@ -266,6 +230,7 @@ impl PolynomialCommitment {
 /// We'd save bandwidth by having separate messages for each
 /// participant, but typical thresholds lie between 1/2 and 2/3,
 /// so this doubles or tripples bandwidth usage.
+#[derive(Debug, PartialEq, Eq)]
 pub struct AllMessage {
     pub(super) content: MessageContent,
     pub(super) signature: Signature,
@@ -303,6 +268,7 @@ impl AllMessage {
 }
 
 /// The contents of the message destined to all participants.
+#[derive(Debug, PartialEq, Eq)]
 pub struct MessageContent {
     pub(super) sender: VerifyingKey,
     pub(super) encryption_nonce: [u8; ENCRYPTION_NONCE_LENGTH],
@@ -337,8 +303,7 @@ impl MessageContent {
 
         bytes.extend(self.sender.to_bytes());
         bytes.extend(&self.encryption_nonce);
-        bytes.extend(self.parameters.participants.to_le_bytes());
-        bytes.extend(self.parameters.threshold.to_le_bytes());
+        bytes.extend(self.parameters.to_bytes());
         bytes.extend(&self.recipients_hash);
 
         for point in &self.polynomial_commitment.coefficients_commitments {
@@ -369,18 +334,10 @@ impl MessageContent {
             .map_err(SPPError::DeserializationError)?;
         cursor += ENCRYPTION_NONCE_LENGTH;
 
-        let participants = u16::from_le_bytes(
-            bytes[cursor..cursor + VEC_LENGTH]
-                .try_into()
-                .map_err(SPPError::DeserializationError)?,
-        );
-        cursor += VEC_LENGTH;
-        let threshold = u16::from_le_bytes(
-            bytes[cursor..cursor + VEC_LENGTH]
-                .try_into()
-                .map_err(SPPError::DeserializationError)?,
-        );
-        cursor += VEC_LENGTH;
+        let parameters = Parameters::from_bytes(&bytes[cursor..cursor + U16_LENGTH * 2])?;
+        cursor += U16_LENGTH * 2;
+
+        let participants = parameters.participants;
 
         let recipients_hash: [u8; RECIPIENTS_HASH_LENGTH] = bytes
             [cursor..cursor + RECIPIENTS_HASH_LENGTH]
@@ -390,7 +347,7 @@ impl MessageContent {
 
         let mut coefficients_commitments = Vec::with_capacity(participants as usize);
 
-        for _ in 0..participants {
+        for _ in 0..parameters.threshold {
             let point =
                 CompressedEdwardsY::from_slice(&bytes[cursor..cursor + COMPRESSED_EDWARDS_LENGTH])
                     .map_err(SPPError::DeserializationError)?;
@@ -419,10 +376,7 @@ impl MessageContent {
         Ok(MessageContent {
             sender,
             encryption_nonce,
-            parameters: Parameters {
-                participants,
-                threshold,
-            },
+            parameters,
             recipients_hash,
             polynomial_commitment,
             encrypted_secret_shares,
@@ -431,30 +385,31 @@ impl MessageContent {
 }
 
 /// The signed output of the SimplPedPoP protocol.
-pub struct DKGOutputMessage {
+#[derive(Debug, PartialEq, Eq)]
+pub struct SPPOutputMessage {
     pub(super) sender: VerifyingKey,
-    pub dkg_output: DKGOutput,
+    pub spp_output: SPPOutput,
     pub(super) signature: Signature,
 }
 
-impl DKGOutputMessage {
+impl SPPOutputMessage {
     /// Creates a signed SimplPedPoP output.
-    pub fn new(sender: VerifyingKey, content: DKGOutput, signature: Signature) -> Self {
+    pub fn new(sender: VerifyingKey, content: SPPOutput, signature: Signature) -> Self {
         Self {
             sender,
-            dkg_output: content,
+            spp_output: content,
             signature,
         }
     }
 
-    /// Serializes the DKGOutput into bytes.
+    /// Serializes the SPPOutput into bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
         let pk_bytes = self.sender.to_bytes();
         bytes.extend(pk_bytes);
 
-        let content_bytes = self.dkg_output.to_bytes();
+        let content_bytes = self.spp_output.to_bytes();
         bytes.extend(content_bytes);
 
         let signature_bytes = self.signature.to_bytes();
@@ -463,7 +418,7 @@ impl DKGOutputMessage {
         bytes
     }
 
-    /// Deserializes the DKGOutput from bytes.
+    /// Deserializes the SPPOutput from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SPPError> {
         let mut cursor = 0;
 
@@ -474,7 +429,7 @@ impl DKGOutputMessage {
         cursor += PUBLIC_KEY_LENGTH;
 
         let content_bytes = &bytes[cursor..bytes.len() - SIGNATURE_LENGTH];
-        let dkg_output = DKGOutput::from_bytes(content_bytes)?;
+        let spp_output = SPPOutput::from_bytes(content_bytes)?;
 
         cursor = bytes.len() - SIGNATURE_LENGTH;
 
@@ -483,22 +438,23 @@ impl DKGOutputMessage {
 
         let signature = Signature::from_bytes(&sig_bytes);
 
-        Ok(DKGOutputMessage {
+        Ok(SPPOutputMessage {
             sender,
-            dkg_output,
+            spp_output,
             signature,
         })
     }
 }
 
 /// The content of the signed output of the SimplPedPoP protocol.
-pub struct DKGOutput {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SPPOutput {
     pub(crate) parameters: Parameters,
-    pub group_public_key: ThresholdPublicKey,
+    pub threshold_public_key: ThresholdPublicKey,
     pub verifying_keys: Vec<(Identifier, VerifyingShare)>,
 }
 
-impl DKGOutput {
+impl SPPOutput {
     /// Creates the content of the SimplPedPoP output.
     pub fn new(
         parameters: &Parameters,
@@ -509,17 +465,17 @@ impl DKGOutput {
 
         Self {
             parameters,
-            group_public_key,
+            threshold_public_key: group_public_key,
             verifying_keys,
         }
     }
-    /// Serializes the DKGOutputContent into bytes.
+    /// Serializes the SPPOutputContent into bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
         bytes.extend(self.parameters.to_bytes());
 
-        let compressed_public_key = self.group_public_key.0.compressed;
+        let compressed_public_key = self.threshold_public_key.0.compressed;
         bytes.extend(compressed_public_key.to_bytes().iter());
 
         let key_count = self.verifying_keys.len() as u16;
@@ -533,7 +489,7 @@ impl DKGOutput {
         bytes
     }
 
-    /// Deserializes the DKGOutputContent from bytes.
+    /// Deserializes the SPPOutputContent from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SPPError> {
         let mut cursor = 0;
 
@@ -568,9 +524,9 @@ impl DKGOutput {
             verifying_keys.push((Identifier(identifier), VerifyingShare(key)));
         }
 
-        Ok(DKGOutput {
+        Ok(SPPOutput {
             parameters,
-            group_public_key,
+            threshold_public_key: group_public_key,
             verifying_keys,
         })
     }
@@ -578,169 +534,64 @@ impl DKGOutput {
 
 #[cfg(test)]
 mod tests {
-    use crate::SigningKey;
-
     use super::*;
-    use ed25519::signature::Signer;
+    use crate::{olaf::test_utils::generate_parameters, SigningKey};
     use merlin::Transcript;
     use rand_core::OsRng;
 
     #[test]
     fn test_serialize_deserialize_all_message() {
-        let sender = SigningKey::generate(&mut OsRng);
-        let encryption_nonce = [1u8; ENCRYPTION_NONCE_LENGTH];
-        let parameters = Parameters {
-            participants: 2,
-            threshold: 1,
-        };
-        let recipients_hash = [2u8; RECIPIENTS_HASH_LENGTH];
-        let coefficients_commitments = vec![
-            Scalar::random(&mut OsRng) * GENERATOR,
-            Scalar::random(&mut OsRng) * GENERATOR,
-        ];
-        let polynomial_commitment = PolynomialCommitment {
-            coefficients_commitments,
-        };
-        let encrypted_secret_shares = vec![
-            EncryptedSecretShare(vec![1; CHACHA20POLY1305_LENGTH]),
-            EncryptedSecretShare(vec![1; CHACHA20POLY1305_LENGTH]),
-        ];
-        let signature = sender.sign(b"sig");
+        let parameters = generate_parameters();
+        let participants = parameters.participants as usize;
+        let threshold = parameters.threshold as usize;
 
-        let message_content = MessageContent::new(
-            sender.verifying_key,
-            encryption_nonce,
-            parameters,
-            recipients_hash,
-            polynomial_commitment,
-            encrypted_secret_shares,
-        );
+        let mut keypairs: Vec<SigningKey> = (0..participants)
+            .map(|_| SigningKey::generate(&mut OsRng))
+            .collect();
 
-        let message = AllMessage::new(message_content, signature);
+        let public_keys: Vec<VerifyingKey> = keypairs.iter().map(|kp| kp.verifying_key).collect();
+
+        let message: AllMessage = keypairs[0]
+            .simplpedpop_contribute_all(threshold as u16, public_keys.clone())
+            .unwrap();
 
         let bytes = message.to_bytes();
 
         let deserialized_message = AllMessage::from_bytes(&bytes).expect("Failed to deserialize");
 
-        assert_eq!(message.content.sender, deserialized_message.content.sender);
-
-        assert_eq!(
-            message.content.encryption_nonce,
-            deserialized_message.content.encryption_nonce
-        );
-
-        assert_eq!(
-            message.content.parameters.participants,
-            deserialized_message.content.parameters.participants
-        );
-
-        assert_eq!(
-            message.content.parameters.threshold,
-            deserialized_message.content.parameters.threshold
-        );
-
-        assert_eq!(
-            message.content.recipients_hash,
-            deserialized_message.content.recipients_hash
-        );
-
-        assert!(message
-            .content
-            .polynomial_commitment
-            .coefficients_commitments
-            .iter()
-            .zip(
-                deserialized_message
-                    .content
-                    .polynomial_commitment
-                    .coefficients_commitments
-                    .iter()
-            )
-            .all(|(a, b)| a.compress() == b.compress()));
-
-        assert!(message
-            .content
-            .encrypted_secret_shares
-            .iter()
-            .zip(deserialized_message.content.encrypted_secret_shares.iter())
-            .all(|(a, b)| a.0 == b.0));
-
-        assert_eq!(message.signature, deserialized_message.signature);
+        assert_eq!(message, deserialized_message);
     }
 
     #[test]
-    fn test_dkg_output_serialization() {
-        let mut rng = OsRng;
+    fn test_spp_output_serialization() {
+        let parameters = generate_parameters();
+        let participants = parameters.participants as usize;
+        let threshold = parameters.threshold as usize;
 
-        let parameters = Parameters::generate(2, 2);
+        let mut keypairs: Vec<SigningKey> = (0..participants)
+            .map(|_| SigningKey::generate(&mut OsRng))
+            .collect();
 
-        let verifying_keys = vec![
-            (
-                Identifier(Scalar::random(&mut rng)),
-                VerifyingShare(VerifyingKey::from(Scalar::random(&mut rng) * GENERATOR)),
-            ),
-            (
-                Identifier(Scalar::random(&mut rng)),
-                VerifyingShare(VerifyingKey::from(Scalar::random(&mut rng) * GENERATOR)),
-            ),
-            (
-                Identifier(Scalar::random(&mut rng)),
-                VerifyingShare(VerifyingKey::from(Scalar::random(&mut rng) * GENERATOR)),
-            ),
-        ];
+        let public_keys: Vec<VerifyingKey> = keypairs.iter().map(|kp| kp.verifying_key).collect();
 
-        let dkg_output = DKGOutput {
-            parameters,
-            group_public_key: ThresholdPublicKey(VerifyingKey::from(
-                Scalar::random(&mut rng) * GENERATOR,
-            )),
-            verifying_keys,
-        };
+        let mut all_messages = Vec::new();
+        for i in 0..participants {
+            let message: AllMessage = keypairs[i]
+                .simplpedpop_contribute_all(threshold as u16, public_keys.clone())
+                .unwrap();
+            all_messages.push(message);
+        }
 
-        let keypair = SigningKey::generate(&mut OsRng);
-        let signature = keypair.sign(b"test");
+        let spp_output = keypairs[0]
+            .simplpedpop_recipient_all(&all_messages)
+            .unwrap();
 
-        let dkg_output = DKGOutputMessage {
-            sender: keypair.verifying_key,
-            dkg_output,
-            signature,
-        };
+        let bytes = spp_output.0.to_bytes();
 
-        let bytes = dkg_output.to_bytes();
+        let deserialized_spp_output_message =
+            SPPOutputMessage::from_bytes(&bytes).expect("Deserialization failed");
 
-        let deserialized_dkg_output =
-            DKGOutputMessage::from_bytes(&bytes).expect("Deserialization failed");
-
-        assert_eq!(
-            deserialized_dkg_output
-                .dkg_output
-                .group_public_key
-                .0
-                .to_bytes(),
-            dkg_output.dkg_output.group_public_key.0.to_bytes(),
-            "Group public keys do not match"
-        );
-
-        assert_eq!(
-            deserialized_dkg_output.dkg_output.verifying_keys.len(),
-            dkg_output.dkg_output.verifying_keys.len(),
-            "Verifying keys counts do not match"
-        );
-
-        assert!(
-            deserialized_dkg_output
-                .dkg_output
-                .verifying_keys
-                .iter()
-                .zip(dkg_output.dkg_output.verifying_keys.iter())
-                .all(|((a, b), (c, d))| a.0 == c.0 && b.0 == d.0),
-            "Verifying keys do not match"
-        );
-
-        assert_eq!(
-            deserialized_dkg_output.signature, dkg_output.signature,
-            "Signatures do not match"
-        );
+        assert_eq!(deserialized_spp_output_message, spp_output.0);
     }
 
     #[test]

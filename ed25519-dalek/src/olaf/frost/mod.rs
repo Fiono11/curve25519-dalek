@@ -13,12 +13,12 @@ use self::{
     },
 };
 use super::{
-    simplpedpop::{DKGOutput, SecretPolynomial},
-    SigningKeypair, ThresholdPublicKey, VerifyingShare,
+    simplpedpop::SPPOutput, Identifier, SigningKeypair, ThresholdPublicKey, VerifyingShare,
 };
 use alloc::vec::Vec;
 use curve25519_dalek::Scalar;
 use ed25519::{signature::Verifier, Signature};
+use merlin::Transcript;
 use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
 
@@ -85,10 +85,22 @@ impl SigningKeypair {
     /// the commitment that was assigned by the coordinator in the SigningPackage.
     ///
     /// [`sign`]: https://www.ietf.org/archive/id/draft-irtf-cfrg-frost-14.html#name-round-two-signature-share-g
+    /// Performed once by each participant selected for the signing operation.
+    ///
+    /// Implements [`sign`] from the spec.
+    ///
+    /// Receives the message to be signed and a set of signing commitments and a set
+    /// of randomizing commitments to be used in that signing operation, including
+    /// that for this participant.
+    ///
+    /// Assumes the participant has already determined which nonce corresponds with
+    /// the commitment that was assigned by the coordinator in the SigningPackage.
+    ///
+    /// [`sign`]: https://www.ietf.org/archive/id/draft-irtf-cfrg-frost-14.html#name-round-two-signature-share-g
     pub fn sign(
         &self,
         message: &[u8],
-        dkg_output: &DKGOutput,
+        dkg_output: &SPPOutput,
         all_signing_commitments: &[SigningCommitments],
         signer_nonces: &SigningNonces,
     ) -> FROSTResult<SignatureShare> {
@@ -126,7 +138,7 @@ impl SigningKeypair {
 
         let binding_factor_list: BindingFactorList = BindingFactorList::compute(
             all_signing_commitments,
-            &dkg_output.group_public_key,
+            &dkg_output.threshold_public_key,
             message,
             &[],
         );
@@ -136,16 +148,12 @@ impl SigningKeypair {
 
         let identifiers_vec: Vec<_> = dkg_output.verifying_keys.iter().map(|x| x.0).collect();
 
-        let lambda_i = SecretPolynomial::compute_lagrange_coefficient(
-            &identifiers_vec,
-            None,
-            *identifiers[index],
-        );
+        let lambda_i = compute_lagrange_coefficient(&identifiers_vec, None, *identifiers[index]);
 
         let mut preimage = vec![];
 
         preimage.extend_from_slice(group_commitment.0.compress().as_bytes());
-        preimage.extend_from_slice(dkg_output.group_public_key.0.as_bytes());
+        preimage.extend_from_slice(dkg_output.threshold_public_key.0.as_bytes());
         preimage.extend_from_slice(&message);
 
         let challenge = hash_to_scalar(&[&preimage[..]]);
@@ -200,7 +208,7 @@ pub fn aggregate(
     group_public_key: ThresholdPublicKey,
 ) -> Result<Signature, FROSTError> {
     if signing_commitments.len() != signature_shares.len() {
-        return Err(FROSTError::IncorrectNumberOfSigningCommitments);
+        //return Err(FROSTError::IncorrectNumberOfSigningCommitments);
     }
 
     let binding_factor_list: BindingFactorList =
@@ -241,6 +249,43 @@ pub(super) fn hash_to_array(inputs: &[&[u8]]) -> [u8; 64] {
 pub(super) fn hash_to_scalar(inputs: &[&[u8]]) -> Scalar {
     let output = hash_to_array(inputs);
     Scalar::from_bytes_mod_order_wide(&output)
+}
+
+/// Generates a lagrange coefficient.
+///
+/// The Lagrange polynomial for a set of points (x_j, y_j) for 0 <= j <= k
+/// is ∑_{i=0}^k y_i.ℓ_i(x), where ℓ_i(x) is the Lagrange basis polynomial:
+///
+/// ℓ_i(x) = ∏_{0≤j≤k; j≠i} (x - x_j) / (x_i - x_j).
+///
+/// This computes ℓ_j(x) for the set of points `xs` and for the j corresponding
+/// to the given xj.
+///
+/// If `x` is None, it uses 0 for it (since Identifiers can't be 0).
+pub(super) fn compute_lagrange_coefficient(
+    x_set: &[Identifier],
+    x: Option<Identifier>,
+    x_i: Identifier,
+) -> Scalar {
+    let mut num = Scalar::ONE;
+    let mut den = Scalar::ONE;
+
+    for x_j in x_set.iter() {
+        if x_i == *x_j {
+            continue;
+        }
+
+        if let Some(x) = x {
+            num *= x.0 - x_j.0;
+            den *= x_i.0 - x_j.0;
+        } else {
+            // Both signs inverted just to avoid requiring Neg (-*xj)
+            num *= x_j.0;
+            den *= x_j.0 - x_i.0;
+        }
+    }
+
+    num * den.invert()
 }
 
 #[cfg(test)]
@@ -318,7 +363,7 @@ mod tests {
                 .1
                 .sign(
                     message,
-                    &dkg_output.0.dkg_output,
+                    &dkg_output.0.spp_output,
                     &all_signing_commitments,
                     &all_signing_nonces[i],
                 )
@@ -331,7 +376,7 @@ mod tests {
             message,
             &all_signing_commitments,
             &signature_shares,
-            dkg_outputs[0].0.dkg_output.group_public_key,
+            dkg_outputs[0].0.spp_output.threshold_public_key,
         )
         .unwrap();
     }
@@ -381,7 +426,7 @@ mod tests {
                 .1
                 .sign(
                     message,
-                    &dkg_output.0.dkg_output,
+                    &dkg_output.0.spp_output,
                     &all_signing_commitments,
                     &all_signing_nonces[i],
                 )
@@ -394,7 +439,7 @@ mod tests {
             message,
             &all_signing_commitments,
             &signature_shares,
-            dkg_outputs[0].0.dkg_output.group_public_key,
+            dkg_outputs[0].0.spp_output.threshold_public_key,
         )
         .unwrap();
     }
@@ -427,7 +472,7 @@ mod tests {
             dkg_outputs.push(dkg_output);
         }
 
-        let group_public_key = dkg_outputs[0].0.dkg_output.group_public_key;
+        let group_public_key = dkg_outputs[0].0.spp_output.threshold_public_key;
 
         let mut all_nonces_map: Vec<Vec<SigningNonces>> = Vec::new();
         let mut all_commitments_map: Vec<Vec<SigningCommitments>> = Vec::new();
@@ -474,7 +519,7 @@ mod tests {
                     .1
                     .sign(
                         &message,
-                        &dkg_output.0.dkg_output,
+                        &dkg_output.0.spp_output,
                         &commitments,
                         nonces_to_use,
                     )

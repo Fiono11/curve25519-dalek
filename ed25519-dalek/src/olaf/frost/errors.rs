@@ -1,6 +1,13 @@
 //! Errors of the FROST protocol.
 
-use crate::SignatureError;
+use core::array::TryFromSliceError;
+
+use alloc::vec::Vec;
+
+use crate::{
+    olaf::{simplpedpop::errors::SPPError, VerifyingShare},
+    SignatureError,
+};
 
 /// A result for the SimplPedPoP protocol.
 pub type FROSTResult<T> = Result<T, FROSTError>;
@@ -8,24 +15,39 @@ pub type FROSTResult<T> = Result<T, FROSTError>;
 /// An error ocurred during the execution of the SimplPedPoP protocol.
 #[derive(Debug)]
 pub enum FROSTError {
-    /// Invalid Proof of Possession.
-    InvalidProofOfPossession(SignatureError),
     /// The number of signing commitments must be at least equal to the threshold.
     InvalidNumberOfSigningCommitments,
-    /// The number of signing commitments must be equal to the number of signature shares.
-    IncorrectNumberOfSigningCommitments,
     /// The participant's signing commitment is missing.
     MissingOwnSigningCommitment,
     /// Commitment equals the identity
     IdentitySigningCommitment,
-    /// The number of veriyfing shares must be equal to the number of participants.
+    /// The number of veriyfing shares must be equal to the number of signers.
     IncorrectNumberOfVerifyingShares,
-    /// The identifiers of the SimplPedPoP protocol must be the same of the FROST protocol.
-    InvalidIdentifier,
+    /// Error deserializing the signature share.
+    SignatureShareDeserializationError,
+    /// The signature share is invalid.
+    InvalidSignatureShare {
+        /// The verifying share(s) of the culprit(s).
+        culprit: Vec<VerifyingShare>,
+    },
     /// The output of the SimplPedPoP protocol must contain the participant's verifying share.
     InvalidOwnVerifyingShare,
     /// Invalid signature.
     InvalidSignature(SignatureError),
+    /// Deserialization error.
+    DeserializationError(TryFromSliceError),
+    /// Invalid nonce commitment.
+    InvalidNonceCommitment,
+    /// Error deserializing the output of the SimplPedPoP protocol.
+    SPPOutputDeserializationError(SPPError),
+    /// The number of signing packages must be at least equal to the threshold.
+    InvalidNumberOfSigningPackages,
+    /// The common data of all the signing packages must be the same.
+    MismatchedCommonData,
+    /// The number of signature shares and the number of signing commitments must be the same.
+    MismatchedSignatureSharesAndSigningCommitments,
+    /// The signing packages are empty.
+    EmptySigningPackages,
 }
 
 #[cfg(test)]
@@ -75,29 +97,29 @@ mod tests {
             all_messages.push(message);
         }
 
-        let mut dkg_outputs = Vec::new();
+        let mut spp_outputs = Vec::new();
 
         for kp in &mut keypairs {
-            let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
-            dkg_outputs.push(dkg_output);
+            let spp_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+            spp_outputs.push(spp_output);
         }
 
         let mut all_signing_commitments = Vec::new();
         let mut all_signing_nonces = Vec::new();
 
-        for dkg_output in &dkg_outputs {
-            let (signing_nonces, signing_commitments) = dkg_output.1.commit(&mut OsRng);
+        for spp_output in &spp_outputs {
+            let (signing_nonces, signing_commitments) = spp_output.1.commit(&mut OsRng);
             all_signing_nonces.push(signing_nonces);
             all_signing_commitments.push(signing_commitments);
         }
 
         let message = b"message";
 
-        dkg_outputs[0].1 = SigningKeypair(SigningKey::generate(&mut rng));
+        spp_outputs[0].1 = SigningKeypair(SigningKey::generate(&mut rng));
 
-        let result = dkg_outputs[0].1.sign(
+        let result = spp_outputs[0].1.sign(
             message,
-            &dkg_outputs[0].0.dkg_output,
+            &spp_outputs[0].0.spp_output,
             &all_signing_commitments,
             &all_signing_nonces[0],
         );
@@ -136,29 +158,29 @@ mod tests {
             all_messages.push(message);
         }
 
-        let mut dkg_outputs = Vec::new();
+        let mut spp_outputs = Vec::new();
 
         for kp in &mut keypairs {
-            let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
-            dkg_outputs.push(dkg_output);
+            let spp_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+            spp_outputs.push(spp_output);
         }
 
         let mut all_signing_commitments = Vec::new();
         let mut all_signing_nonces = Vec::new();
 
-        for dkg_output in &dkg_outputs {
-            let (signing_nonces, signing_commitments) = dkg_output.1.commit(&mut OsRng);
+        for spp_output in &spp_outputs {
+            let (signing_nonces, signing_commitments) = spp_output.1.commit(&mut OsRng);
             all_signing_nonces.push(signing_nonces);
             all_signing_commitments.push(signing_commitments);
         }
 
         let message = b"message";
 
-        dkg_outputs[0].0.dkg_output.verifying_keys.pop();
+        spp_outputs[0].0.spp_output.verifying_keys.pop();
 
-        let result = dkg_outputs[0].1.sign(
+        let result = spp_outputs[0].1.sign(
             message,
-            &dkg_outputs[0].0.dkg_output,
+            &spp_outputs[0].0.spp_output,
             &all_signing_commitments,
             &all_signing_nonces[0],
         );
@@ -197,18 +219,18 @@ mod tests {
             all_messages.push(message);
         }
 
-        let mut dkg_outputs = Vec::new();
+        let mut spp_outputs = Vec::new();
 
         for kp in &mut keypairs {
-            let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
-            dkg_outputs.push(dkg_output);
+            let spp_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+            spp_outputs.push(spp_output);
         }
 
         let mut all_signing_commitments = Vec::new();
         let mut all_signing_nonces = Vec::new();
 
-        for dkg_output in &dkg_outputs {
-            let (signing_nonces, signing_commitments) = dkg_output.1.commit(&mut OsRng);
+        for spp_output in &spp_outputs {
+            let (signing_nonces, signing_commitments) = spp_output.1.commit(&mut OsRng);
             all_signing_nonces.push(signing_nonces);
             all_signing_commitments.push(signing_commitments);
         }
@@ -220,9 +242,9 @@ mod tests {
             binding: NonceCommitment(Scalar::random(&mut OsRng) * GENERATOR),
         };
 
-        let result = dkg_outputs[0].1.sign(
+        let result = spp_outputs[0].1.sign(
             message,
-            &dkg_outputs[0].0.dkg_output,
+            &spp_outputs[0].0.spp_output,
             &all_signing_commitments,
             &all_signing_nonces[0],
         );
@@ -261,18 +283,18 @@ mod tests {
             all_messages.push(message);
         }
 
-        let mut dkg_outputs = Vec::new();
+        let mut spp_outputs = Vec::new();
 
         for kp in &mut keypairs {
-            let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
-            dkg_outputs.push(dkg_output);
+            let spp_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+            spp_outputs.push(spp_output);
         }
 
         let mut all_signing_commitments = Vec::new();
         let mut all_signing_nonces = Vec::new();
 
-        for dkg_output in &dkg_outputs {
-            let (signing_nonces, signing_commitments) = dkg_output.1.commit(&mut OsRng);
+        for spp_output in &spp_outputs {
+            let (signing_nonces, signing_commitments) = spp_output.1.commit(&mut OsRng);
             all_signing_nonces.push(signing_nonces);
             all_signing_commitments.push(signing_commitments);
         }
@@ -280,9 +302,9 @@ mod tests {
         let message = b"message";
 
         all_signing_commitments[1].hiding = NonceCommitment(EdwardsPoint::identity());
-        let result = dkg_outputs[0].1.sign(
+        let result = spp_outputs[0].1.sign(
             message,
-            &dkg_outputs[0].0.dkg_output,
+            &spp_outputs[0].0.spp_output,
             &all_signing_commitments,
             &all_signing_nonces[0],
         );
@@ -321,27 +343,27 @@ mod tests {
             all_messages.push(message);
         }
 
-        let mut dkg_outputs = Vec::new();
+        let mut spp_outputs = Vec::new();
 
         for kp in &mut keypairs {
-            let dkg_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
-            dkg_outputs.push(dkg_output);
+            let spp_output = kp.simplpedpop_recipient_all(&all_messages).unwrap();
+            spp_outputs.push(spp_output);
         }
 
         let mut all_signing_commitments = Vec::new();
         let mut all_signing_nonces = Vec::new();
 
-        for dkg_output in &dkg_outputs {
-            let (signing_nonces, signing_commitments) = dkg_output.1.commit(&mut OsRng);
+        for spp_output in &spp_outputs {
+            let (signing_nonces, signing_commitments) = spp_output.1.commit(&mut OsRng);
             all_signing_nonces.push(signing_nonces);
             all_signing_commitments.push(signing_commitments);
         }
 
         let message = b"message";
 
-        let result = dkg_outputs[0].1.sign(
+        let result = spp_outputs[0].1.sign(
             message,
-            &dkg_outputs[0].0.dkg_output,
+            &spp_outputs[0].0.spp_output,
             &all_signing_commitments[..1],
             &all_signing_nonces[0],
         );
